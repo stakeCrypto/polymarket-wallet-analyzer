@@ -128,10 +128,15 @@ class CacheManager:
 class PolymarketAPIClient:
     """API client for Polymarket with rate limiting, caching, and retry logic."""
 
+    # API endpoints
+    DATA_API_URL = "https://data-api.polymarket.com"
+    GAMMA_API_URL = "https://gamma-api.polymarket.com"
+
     def __init__(self) -> None:
         """Initialize the API client."""
         self.config = get_config()
-        self.base_url = self.config.api.base_url
+        self.base_url = self.DATA_API_URL  # Primary API for trades
+        self.gamma_url = self.GAMMA_API_URL  # For markets metadata
         self.clob_url = self.config.api.clob_url
 
         # Setup rate limiter
@@ -326,13 +331,36 @@ class PolymarketAPIClient:
 
         return self.get("trades", params=params)
 
+    def get_wallet_trades(
+        self,
+        wallet_address: str,
+        limit: int = 500,
+        offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Fetch wallet trading history from data-api.
+
+        Args:
+            wallet_address: Ethereum wallet address.
+            limit: Maximum number of trades to fetch (max 10000).
+            offset: Offset for pagination.
+
+        Returns:
+            List of trade data dictionaries.
+        """
+        params = {
+            "user": wallet_address.lower(),
+            "limit": min(limit, 10000),
+            "offset": offset
+        }
+        return self.get("trades", params=params)
+
     def get_wallet_activity(
         self,
         wallet_address: str,
         limit: int = 500,
         offset: int = 0
     ) -> list[dict[str, Any]]:
-        """Fetch wallet trading activity.
+        """Fetch wallet activity (alias for get_wallet_trades).
 
         Args:
             wallet_address: Ethereum wallet address.
@@ -342,12 +370,7 @@ class PolymarketAPIClient:
         Returns:
             List of activity data dictionaries.
         """
-        params = {
-            "user": wallet_address.lower(),
-            "limit": limit,
-            "offset": offset
-        }
-        return self.get("activity", params=params)
+        return self.get_wallet_trades(wallet_address, limit, offset)
 
     def get_wallet_positions(self, wallet_address: str) -> list[dict[str, Any]]:
         """Fetch current positions for a wallet.
@@ -358,8 +381,14 @@ class PolymarketAPIClient:
         Returns:
             List of position data dictionaries.
         """
+        # Positions endpoint on data-api
         params = {"user": wallet_address.lower()}
-        return self.get("positions", params=params)
+        try:
+            return self.get("positions", params=params)
+        except Exception:
+            # Fallback: return empty if positions endpoint unavailable
+            logger.warning("Positions endpoint unavailable, returning empty list")
+            return []
 
     def get_price_history(
         self,

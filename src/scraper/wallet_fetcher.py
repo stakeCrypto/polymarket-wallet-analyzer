@@ -96,13 +96,13 @@ class WalletFetcher:
 
     # Market category mapping
     CATEGORY_KEYWORDS: dict[str, list[str]] = {
-        "politics": ["election", "president", "congress", "senate", "trump", "biden", "vote"],
-        "crypto": ["bitcoin", "btc", "eth", "ethereum", "crypto", "token", "defi"],
-        "sports": ["nfl", "nba", "mlb", "soccer", "football", "basketball", "game", "match"],
-        "entertainment": ["movie", "oscar", "grammy", "celebrity", "box office"],
-        "finance": ["fed", "interest rate", "inflation", "stock", "market", "gdp"],
-        "science": ["spacex", "nasa", "launch", "ai", "climate"],
-        "world": ["ukraine", "russia", "china", "war", "conflict", "treaty"]
+        "politics": ["election", "president", "congress", "senate", "trump", "biden", "vote", "governor", "mayor", "democrat", "republican"],
+        "crypto": ["bitcoin", "btc", "eth", "ethereum", "crypto", "token", "defi", "solana", "dogecoin"],
+        "sports": ["nfl", "nba", "mlb", "soccer", "football", "basketball", "game", "match", "championship", "super bowl", "world cup"],
+        "entertainment": ["movie", "oscar", "grammy", "celebrity", "box office", "album", "emmy", "netflix"],
+        "finance": ["fed", "interest rate", "inflation", "stock", "market", "gdp", "recession", "s&p", "nasdaq"],
+        "science": ["spacex", "nasa", "launch", "ai", "climate", "openai", "gpt", "research"],
+        "world": ["ukraine", "russia", "china", "war", "conflict", "treaty", "iran", "israel", "khamenei", "strikes", "military", "supreme leader", "cease"]
     }
 
     def __init__(self, api_client: Optional[PolymarketAPIClient] = None) -> None:
@@ -194,15 +194,23 @@ class WalletFetcher:
         """Parse raw trade data into Trade object.
 
         Args:
-            raw_trade: Raw trade data from API.
+            raw_trade: Raw trade data from API (data-api format).
             wallet_address: The wallet address being analyzed.
 
         Returns:
             Normalized Trade object.
         """
-        market_id = raw_trade.get("market", raw_trade.get("conditionId", "unknown"))
-        market_info = self._get_market_info(market_id)
-        market_title = market_info.get("question", market_info.get("title", "Unknown"))
+        # Data API format fields:
+        # proxyWallet, side, asset, conditionId, size, price, timestamp, title, slug, outcome, transactionHash
+
+        market_id = raw_trade.get("conditionId", raw_trade.get("market", "unknown"))
+
+        # Title is directly available in data-api response
+        market_title = raw_trade.get("title", "Unknown Market")
+        if not market_title or market_title == "Unknown Market":
+            # Fallback to fetching market info
+            market_info = self._get_market_info(market_id)
+            market_title = market_info.get("question", market_info.get("title", "Unknown"))
 
         # Parse numeric values safely
         price = Decimal(str(raw_trade.get("price", 0)))
@@ -211,7 +219,7 @@ class WalletFetcher:
         # Calculate cost
         cost_usd = price * size
 
-        # Determine side
+        # Determine side (data-api uses uppercase BUY/SELL)
         side = raw_trade.get("side", "").lower()
         if not side:
             # Infer from trade type or maker/taker
@@ -225,13 +233,16 @@ class WalletFetcher:
             raw_trade.get("timestamp", raw_trade.get("createdAt", 0))
         )
 
+        # Get outcome directly from response
+        outcome = raw_trade.get("outcome", "Unknown")
+
         return Trade(
-            id=raw_trade.get("id", raw_trade.get("transactionHash", str(hash(str(raw_trade))))),
+            id=raw_trade.get("transactionHash", raw_trade.get("id", str(hash(str(raw_trade))))),
             wallet_address=wallet_address.lower(),
             market_id=market_id,
             market_title=market_title,
             market_category=self._categorize_market(market_title),
-            outcome=raw_trade.get("outcome", raw_trade.get("asset", "Unknown")),
+            outcome=outcome,
             side=side,
             price=price,
             size=size,
