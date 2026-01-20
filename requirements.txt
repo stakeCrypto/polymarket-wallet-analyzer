@@ -1,0 +1,25 @@
+# Core dependencies
+requests>=2.31.0
+pandas>=2.0.0
+plotly>=5.18.0
+python-dotenv>=1.0.0
+
+# CLI
+click>=8.1.0
+
+# Data processing
+numpy>=1.24.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+responses>=0.24.0
+
+# Type checking (dev)
+mypy>=1.7.0
+types-requests>=2.31.0
+
+# Code quality (dev)
+black>=23.0.0
+isort>=5.12.0
+flake8>=6.1.0
