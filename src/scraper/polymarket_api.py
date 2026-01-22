@@ -412,3 +412,70 @@ class PolymarketAPIClient:
             "fidelity": fidelity
         }
         return self.get("prices-history", params=params)
+
+    def get_wallet_activity(
+        self,
+        wallet_address: str,
+        limit: int = 500,
+        offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Fetch wallet activity including trades, redemptions, and splits.
+
+        Args:
+            wallet_address: Ethereum wallet address.
+            limit: Maximum number of activities to fetch.
+            offset: Offset for pagination.
+
+        Returns:
+            List of activity data dictionaries (TRADE, REDEEM, SPLIT types).
+        """
+        params = {
+            "user": wallet_address.lower(),
+            "limit": min(limit, 1000),
+            "offset": offset
+        }
+        return self.get("activity", params=params)
+
+    def get_market_by_slug(self, slug: str) -> Optional[dict[str, Any]]:
+        """Fetch market data by slug from gamma API.
+
+        Args:
+            slug: Market slug identifier.
+
+        Returns:
+            Market data dictionary or None if not found.
+        """
+        try:
+            url = f"{self.gamma_url}/markets"
+            response = self.session.get(url, params={"slug": slug}, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data and isinstance(data, list):
+                    return data[0]
+                return data
+        except Exception as e:
+            logger.warning(f"Failed to fetch market by slug {slug}: {e}")
+        return None
+
+    def get_current_prices(self, condition_id: str, slug: str = None) -> dict[str, float]:
+        """Get current prices for a market's outcomes.
+
+        Args:
+            condition_id: Market condition ID.
+            slug: Optional market slug for fallback lookup.
+
+        Returns:
+            Dictionary mapping outcome names to current prices.
+        """
+        try:
+            # Try gamma API with slug
+            if slug:
+                market = self.get_market_by_slug(slug)
+                if market:
+                    prices = market.get("outcomePrices", [])
+                    outcomes = market.get("outcomes", ["Yes", "No"])
+                    if prices and len(prices) == len(outcomes):
+                        return {outcomes[i]: float(prices[i]) for i in range(len(outcomes))}
+        except Exception as e:
+            logger.warning(f"Failed to get current prices for {condition_id}: {e}")
+        return {}

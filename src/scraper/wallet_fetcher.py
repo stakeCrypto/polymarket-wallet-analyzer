@@ -91,6 +91,31 @@ class Position:
         }
 
 
+@dataclass
+class Redemption:
+    """Normalized redemption data (market resolution payout)."""
+
+    market_id: str
+    market_title: str
+    outcome: str
+    size: Decimal
+    usdc_received: Decimal
+    timestamp: datetime
+    transaction_hash: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert redemption to dictionary."""
+        return {
+            "market_id": self.market_id,
+            "market_title": self.market_title,
+            "outcome": self.outcome,
+            "size": str(self.size),
+            "usdc_received": str(self.usdc_received),
+            "timestamp": self.timestamp.isoformat(),
+            "transaction_hash": self.transaction_hash
+        }
+
+
 class WalletFetcher:
     """Fetches and normalizes wallet trading history from Polymarket."""
 
@@ -252,6 +277,36 @@ class WalletFetcher:
             fee_usd=Decimal(str(raw_trade.get("fee", 0)))
         )
 
+    def _parse_redemption(self, raw_activity: dict[str, Any], wallet_address: str) -> Redemption:
+        """Parse raw redemption activity into Redemption object.
+
+        Args:
+            raw_activity: Raw activity data from API (type=REDEEM).
+            wallet_address: The wallet address being analyzed.
+
+        Returns:
+            Normalized Redemption object.
+        """
+        market_id = raw_activity.get("conditionId", "unknown")
+        market_title = raw_activity.get("title", "Unknown Market")
+
+        size = Decimal(str(raw_activity.get("size", 0)))
+        usdc_received = Decimal(str(raw_activity.get("usdcSize", 0)))
+
+        timestamp = self._normalize_timestamp(
+            raw_activity.get("timestamp", 0)
+        )
+
+        return Redemption(
+            market_id=market_id,
+            market_title=market_title,
+            outcome=raw_activity.get("outcome", ""),
+            size=size,
+            usdc_received=usdc_received,
+            timestamp=timestamp,
+            transaction_hash=raw_activity.get("transactionHash")
+        )
+
     def _parse_position(self, raw_position: dict[str, Any]) -> Position:
         """Parse raw position data into Position object.
 
@@ -287,13 +342,15 @@ class WalletFetcher:
     def fetch_all_trades(
         self,
         wallet_address: str,
-        batch_size: int = 500
+        batch_size: int = 500,
+        max_trades: int = 5000
     ) -> list[Trade]:
-        """Fetch all trades for a wallet.
+        """Fetch trades for a wallet.
 
         Args:
             wallet_address: Ethereum wallet address.
             batch_size: Number of trades to fetch per request.
+            max_trades: Maximum total trades to fetch (default 5000 for performance).
 
         Returns:
             List of normalized Trade objects.
@@ -303,11 +360,11 @@ class WalletFetcher:
         all_trades: list[Trade] = []
         offset = 0
 
-        while True:
+        while len(all_trades) < max_trades:
             logger.debug(f"Fetching trades batch at offset {offset}")
 
             try:
-                raw_trades = self.api.get_wallet_activity(
+                raw_trades = self.api.get_wallet_trades(
                     wallet_address,
                     limit=batch_size,
                     offset=offset
@@ -327,10 +384,17 @@ class WalletFetcher:
                     logger.warning(f"Failed to parse trade: {e}")
                     continue
 
+            logger.info(f"Fetched {len(all_trades)} trades so far...")
+
             if len(raw_trades) < batch_size:
                 break
 
             offset += batch_size
+
+        # Trim to max_trades if exceeded
+        if len(all_trades) > max_trades:
+            logger.info(f"Limiting to most recent {max_trades} trades")
+            all_trades = all_trades[-max_trades:]
 
         # Sort by timestamp
         all_trades.sort(key=lambda t: t.timestamp)
@@ -338,6 +402,58 @@ class WalletFetcher:
         logger.info(f"Fetched {len(all_trades)} trades for wallet {wallet_address}")
 
         return all_trades
+
+    def fetch_redemptions(
+        self,
+        wallet_address: str,
+        max_activities: int = 2000
+    ) -> list[Redemption]:
+        """Fetch redemptions (market resolution payouts) for a wallet.
+
+        Args:
+            wallet_address: Ethereum wallet address.
+            max_activities: Maximum activities to scan for redemptions.
+
+        Returns:
+            List of normalized Redemption objects.
+        """
+        logger.info(f"Fetching redemptions for wallet: {wallet_address}")
+
+        redemptions: list[Redemption] = []
+        offset = 0
+        batch_size = 500
+
+        while offset < max_activities:
+            try:
+                activities = self.api.get_wallet_activity(
+                    wallet_address,
+                    limit=batch_size,
+                    offset=offset
+                )
+            except Exception as e:
+                logger.error(f"Failed to fetch activities at offset {offset}: {e}")
+                break
+
+            if not activities:
+                break
+
+            for activity in activities:
+                if activity.get("type") == "REDEEM":
+                    try:
+                        redemption = self._parse_redemption(activity, wallet_address)
+                        if redemption.usdc_received > 0:
+                            redemptions.append(redemption)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse redemption: {e}")
+                        continue
+
+            if len(activities) < batch_size:
+                break
+
+            offset += batch_size
+
+        logger.info(f"Fetched {len(redemptions)} redemptions for wallet {wallet_address}")
+        return redemptions
 
     def fetch_positions(self, wallet_address: str) -> list[Position]:
         """Fetch current positions for a wallet.
@@ -374,15 +490,16 @@ class WalletFetcher:
         self,
         wallet_address: str
     ) -> dict[str, Any]:
-        """Fetch complete wallet data including trades and positions.
+        """Fetch complete wallet data including trades, redemptions, and positions.
 
         Args:
             wallet_address: Ethereum wallet address.
 
         Returns:
-            Dictionary containing trades, positions, and metadata.
+            Dictionary containing trades, redemptions, positions, and metadata.
         """
         trades = self.fetch_all_trades(wallet_address)
+        redemptions = self.fetch_redemptions(wallet_address)
         positions = self.fetch_positions(wallet_address)
 
         # Calculate basic stats
@@ -392,9 +509,11 @@ class WalletFetcher:
         return {
             "wallet_address": wallet_address.lower(),
             "trades": trades,
+            "redemptions": redemptions,
             "positions": positions,
             "metadata": {
                 "total_trades": len(trades),
+                "total_redemptions": len(redemptions),
                 "total_positions": len(positions),
                 "first_trade": first_trade.isoformat() if first_trade else None,
                 "last_trade": last_trade.isoformat() if last_trade else None,

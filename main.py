@@ -5,6 +5,7 @@ Polymarket Wallet Analyzer CLI
 A professional tool for analyzing Polymarket trading wallets.
 
 Usage:
+    python main.py                         # Interactive mode
     python main.py analyze <wallet_address>
     python main.py export --format json
     python main.py dashboard --open
@@ -82,8 +83,9 @@ def analyze(
         wallet_data = wallet_fetcher.fetch_wallet_data(wallet_address)
         trades = wallet_data["trades"]
         positions = wallet_data["positions"]
+        redemptions = wallet_data.get("redemptions", [])
 
-        click.echo(f"  Found {len(trades)} trades and {len(positions)} open positions")
+        click.echo(f"  Found {len(trades)} trades, {len(redemptions)} redemptions, {len(positions)} open positions")
 
         if not trades:
             click.echo(click.style("\nNo trades found for this wallet.", fg="yellow"))
@@ -118,9 +120,9 @@ def analyze(
         # Step 5: Generate exports
         click.echo(click.style("\nStep 5/5: Generating exports...", fg="cyan"))
 
-        # Generate LLM export
+        # Generate LLM export (includes redemption P&L)
         llm_formatter = LLMFormatter()
-        llm_export = llm_formatter.format(wallet_address, trades, positions, processed_trades)
+        llm_export = llm_formatter.format(wallet_address, trades, positions, processed_trades, redemptions)
 
         # Cache for export command
         _analysis_cache["llm_export"] = llm_export
@@ -168,9 +170,23 @@ def analyze(
         click.echo(click.style("Summary:", fg="white", bold=True))
         click.echo(f"  Wallet: {wallet_address[:10]}...{wallet_address[-4:]}")
         click.echo(f"  Total Trades: {metrics.total_trades}")
+        click.echo(f"  Redemptions: {len(redemptions)}")
         click.echo(f"  Total Volume: ${metrics.total_volume_usd:,.0f}")
-        pnl_color = "green" if metrics.total_realized_pnl >= 0 else "red"
-        click.echo(f"  Net P&L: " + click.style(f"${metrics.total_realized_pnl:+,.2f}", fg=pnl_color))
+
+        # Show P&L breakdown (trades + redemptions + unrealized)
+        total_pnl = llm_export.wallet_summary.get("total_pnl_usd", metrics.total_realized_pnl)
+        redemption_pnl = llm_export.wallet_summary.get("redemption_pnl_usd", 0)
+        unrealized_pnl = llm_export.wallet_summary.get("unrealized_pnl_usd", 0)
+
+        pnl_color = "green" if total_pnl >= 0 else "red"
+        click.echo(f"  Trade P&L: ${metrics.total_realized_pnl:+,.2f}")
+        if redemption_pnl != 0:
+            redemption_color = "green" if redemption_pnl >= 0 else "red"
+            click.echo(f"  Redemption P&L: " + click.style(f"${redemption_pnl:+,.2f}", fg=redemption_color))
+        if unrealized_pnl != 0:
+            unrealized_color = "green" if unrealized_pnl >= 0 else "red"
+            click.echo(f"  Unrealized P&L: " + click.style(f"${unrealized_pnl:+,.2f}", fg=unrealized_color) + f" ({len(positions)} positions)")
+        click.echo(f"  Total P&L: " + click.style(f"${total_pnl:+,.2f}", fg=pnl_color))
         click.echo(f"  Win Rate: {metrics.win_rate:.1%}")
         click.echo(f"  Strategy: {strategy.primary_strategy.value.replace('_', ' ').title()}")
 
@@ -298,21 +314,28 @@ def quick(wallet_address: str) -> None:
 
         data_processor = DataProcessor()
         processed_trades = data_processor.calculate_realized_pnl(wallet_data["trades"])
+        redemptions = wallet_data.get("redemptions", [])
 
         llm_formatter = LLMFormatter()
         compact = llm_formatter.format_compact(
             wallet_address,
             wallet_data["trades"],
             wallet_data["positions"],
-            processed_trades
+            processed_trades,
+            redemptions
         )
 
         click.echo(f"\n{'='*40}")
         click.echo(f"Wallet: {compact['wallet']}")
         click.echo(f"{'='*40}")
         click.echo(f"Trades: {compact['summary']['trades']}")
+        click.echo(f"Redemptions: {compact.get('redemptions', 0)}")
+        click.echo(f"Open Positions: {compact.get('positions', 0)}")
         click.echo(f"Volume: {compact['summary']['volume']}")
-        click.echo(f"P&L: {compact['summary']['pnl']}")
+        click.echo(f"Total P&L: {compact['summary']['pnl']}")
+        click.echo(f"  Trade P&L: {compact['summary'].get('trade_pnl', compact['summary']['pnl'])}")
+        click.echo(f"  Redemption P&L: {compact['summary'].get('redemption_pnl', '$0')}")
+        click.echo(f"  Unrealized P&L: {compact['summary'].get('unrealized_pnl', '$0')}")
         click.echo(f"Win Rate: {compact['summary']['win_rate']}")
         click.echo(f"ROI: {compact['summary']['roi']}")
         click.echo(f"Strategy: {compact['strategy']}")
@@ -324,5 +347,19 @@ def quick(wallet_address: str) -> None:
         sys.exit(1)
 
 
+@cli.command()
+def interactive() -> None:
+    """Launch interactive mode with menu-driven interface."""
+    from src.interactive import InteractiveAnalyzer
+    analyzer = InteractiveAnalyzer()
+    analyzer.run()
+
+
 if __name__ == "__main__":
-    cli()
+    # If no arguments provided, launch interactive mode
+    if len(sys.argv) == 1:
+        from src.interactive import InteractiveAnalyzer
+        analyzer = InteractiveAnalyzer()
+        analyzer.run()
+    else:
+        cli()

@@ -9,7 +9,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from ..config import get_logger
-from .wallet_fetcher import Position, Trade
+from .wallet_fetcher import Position, Redemption, Trade
 
 logger = get_logger(__name__)
 
@@ -162,6 +162,79 @@ class DataProcessor:
             ))
 
         return processed
+
+    def calculate_redemption_pnl(
+        self,
+        trades: list[Trade],
+        redemptions: list[Redemption]
+    ) -> tuple[Decimal, list[dict]]:
+        """Calculate P&L from market redemptions (resolution payouts).
+
+        For each redemption, finds the original buy trades and calculates
+        the profit/loss based on cost basis vs redemption payout.
+
+        Args:
+            trades: List of trades to find cost basis from.
+            redemptions: List of redemptions (market resolution payouts).
+
+        Returns:
+            Tuple of (total_redemption_pnl, list of redemption details).
+        """
+        if not redemptions:
+            return Decimal("0"), []
+
+        # Build cost basis by market
+        market_costs: dict[str, dict] = defaultdict(lambda: {
+            "total_cost": Decimal("0"),
+            "total_size": Decimal("0"),
+            "buys": []
+        })
+
+        for trade in trades:
+            if trade.is_buy:
+                key = trade.market_id
+                market_costs[key]["total_cost"] += trade.cost_usd
+                market_costs[key]["total_size"] += trade.size
+                market_costs[key]["buys"].append(trade)
+
+        # Calculate P&L for each redemption
+        total_pnl = Decimal("0")
+        redemption_details = []
+
+        for redemption in redemptions:
+            market_id = redemption.market_id
+            cost_data = market_costs.get(market_id)
+
+            if cost_data and cost_data["total_size"] > 0:
+                # Calculate average cost per share
+                avg_cost = cost_data["total_cost"] / cost_data["total_size"]
+
+                # Cost basis for redeemed shares
+                # Note: redemption.size is shares redeemed, usdc_received is payout
+                redeemed_size = min(redemption.size, cost_data["total_size"])
+                cost_basis = avg_cost * redeemed_size
+
+                # P&L = payout - cost basis
+                pnl = redemption.usdc_received - cost_basis
+            else:
+                # No buys found, treat redemption as pure profit
+                pnl = redemption.usdc_received
+                cost_basis = Decimal("0")
+
+            total_pnl += pnl
+
+            redemption_details.append({
+                "market_id": market_id,
+                "market_title": redemption.market_title,
+                "size_redeemed": float(redemption.size),
+                "usdc_received": float(redemption.usdc_received),
+                "cost_basis": float(cost_basis) if cost_data else 0,
+                "pnl": float(pnl),
+                "timestamp": redemption.timestamp.isoformat()
+            })
+
+        logger.info(f"Calculated redemption P&L: ${total_pnl:.2f} from {len(redemptions)} redemptions")
+        return total_pnl, redemption_details
 
     def compute_market_summaries(
         self,

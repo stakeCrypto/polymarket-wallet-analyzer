@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..config import get_logger
-from ..scraper.data_processor import ProcessedTrade
-from ..scraper.wallet_fetcher import Position, Trade
+from ..scraper.data_processor import DataProcessor, ProcessedTrade
+from ..scraper.wallet_fetcher import Position, Redemption, Trade
 from .performance import PerformanceAnalyzer, PerformanceMetrics, TradePerformance
 from .strategy_detector import StrategyDetector, StrategyProfile
 
@@ -78,11 +78,15 @@ class LLMFormatter:
         Returns:
             Wallet summary dictionary.
         """
+        # Calculate unrealized P&L from open positions
+        unrealized_pnl = sum(float(p.unrealized_pnl) for p in positions)
+
         return {
             "address": wallet_address,
             "total_trades": metrics.total_trades,
             "total_volume_usd": round(metrics.total_volume_usd, 2),
             "net_pnl_usd": round(metrics.total_realized_pnl, 2),
+            "unrealized_pnl_usd": round(unrealized_pnl, 2),
             "win_rate": round(metrics.win_rate, 3),
             "active_positions": len(positions),
             "active_since": metrics.first_trade_date.strftime("%Y-%m-%d") if metrics.first_trade_date else None,
@@ -215,7 +219,8 @@ class LLMFormatter:
         wallet_address: str,
         trades: list[Trade],
         positions: list[Position],
-        processed_trades: list[ProcessedTrade]
+        processed_trades: list[ProcessedTrade],
+        redemptions: list[Redemption] = None
     ) -> LLMExport:
         """Generate LLM-optimized export from trading data.
 
@@ -224,6 +229,7 @@ class LLMFormatter:
             trades: List of raw trades.
             positions: List of current positions.
             processed_trades: List of processed trades with P&L.
+            redemptions: List of redemptions (market resolution payouts).
 
         Returns:
             LLMExport object with formatted analysis.
@@ -234,16 +240,41 @@ class LLMFormatter:
         metrics = self.performance_analyzer.analyze(processed_trades)
         strategy = self.strategy_detector.detect(processed_trades)
 
+        # Calculate redemption P&L
+        redemption_pnl = 0.0
+        redemption_details = []
+        if redemptions:
+            data_processor = DataProcessor()
+            redemption_pnl_decimal, redemption_details = data_processor.calculate_redemption_pnl(
+                trades, redemptions
+            )
+            redemption_pnl = float(redemption_pnl_decimal)
+
         # Get top and worst trades
         top_trades = self.performance_analyzer.get_top_trades(n=10)
         worst_trades = self.performance_analyzer.get_worst_trades(n=5)
 
+        # Update wallet summary with total P&L (trades + redemptions + unrealized)
+        wallet_summary = self._generate_wallet_summary(
+            wallet_address, trades, positions, metrics
+        )
+        wallet_summary["redemption_pnl_usd"] = round(redemption_pnl, 2)
+        unrealized_pnl = wallet_summary.get("unrealized_pnl_usd", 0)
+        wallet_summary["total_pnl_usd"] = round(
+            metrics.total_realized_pnl + redemption_pnl + unrealized_pnl, 2
+        )
+        wallet_summary["total_redemptions"] = len(redemptions) if redemptions else 0
+
+        # Update performance metrics with redemption and unrealized P&L info
+        perf_metrics = metrics.to_dict()
+        perf_metrics["pnl"]["redemption"] = redemption_pnl
+        perf_metrics["pnl"]["unrealized"] = unrealized_pnl
+        perf_metrics["pnl"]["total"] = metrics.total_realized_pnl + redemption_pnl + unrealized_pnl
+
         # Generate export
         export = LLMExport(
-            wallet_summary=self._generate_wallet_summary(
-                wallet_address, trades, positions, metrics
-            ),
-            performance_metrics=metrics.to_dict(),
+            wallet_summary=wallet_summary,
+            performance_metrics=perf_metrics,
             top_trades=[self._format_trade_for_llm(t) for t in top_trades],
             worst_trades=[self._format_trade_for_llm(t) for t in worst_trades],
             detected_strategy=strategy.to_dict(),
@@ -251,12 +282,14 @@ class LLMFormatter:
             key_insights=self._generate_key_insights(metrics, strategy),
             metadata={
                 "generated_at": datetime.now(timezone.utc).isoformat(),
-                "analyzer_version": "1.0.0",
+                "analyzer_version": "1.1.0",
                 "total_trades_analyzed": len(processed_trades),
+                "redemptions_analyzed": len(redemptions) if redemptions else 0,
                 "data_quality": {
                     "trades_parsed": len(trades),
                     "trades_processed": len(processed_trades),
-                    "positions_active": len(positions)
+                    "positions_active": len(positions),
+                    "redemptions": len(redemptions) if redemptions else 0
                 }
             }
         )
@@ -270,7 +303,8 @@ class LLMFormatter:
         wallet_address: str,
         trades: list[Trade],
         positions: list[Position],
-        processed_trades: list[ProcessedTrade]
+        processed_trades: list[ProcessedTrade],
+        redemptions: list[Redemption] = None
     ) -> dict[str, Any]:
         """Generate compact summary for quick LLM analysis.
 
@@ -279,23 +313,32 @@ class LLMFormatter:
             trades: List of raw trades.
             positions: List of current positions.
             processed_trades: List of processed trades.
+            redemptions: List of redemptions (market resolution payouts).
 
         Returns:
             Compact summary dictionary.
         """
         full_export = self.format(
-            wallet_address, trades, positions, processed_trades
+            wallet_address, trades, positions, processed_trades, redemptions
         )
+
+        # Use total P&L (trades + redemptions) for display
+        total_pnl = full_export.wallet_summary.get("total_pnl_usd", full_export.wallet_summary["net_pnl_usd"])
 
         return {
             "wallet": wallet_address[:10] + "...",
             "summary": {
                 "trades": full_export.wallet_summary["total_trades"],
                 "volume": f"${full_export.wallet_summary['total_volume_usd']:,.0f}",
-                "pnl": f"${full_export.wallet_summary['net_pnl_usd']:,.0f}",
+                "pnl": f"${total_pnl:,.0f}",
+                "trade_pnl": f"${full_export.wallet_summary['net_pnl_usd']:,.0f}",
+                "redemption_pnl": f"${full_export.wallet_summary.get('redemption_pnl_usd', 0):,.0f}",
+                "unrealized_pnl": f"${full_export.wallet_summary.get('unrealized_pnl_usd', 0):,.0f}",
                 "win_rate": f"{full_export.wallet_summary['win_rate']:.1%}",
                 "roi": f"{full_export.performance_metrics['roi_percent']:.1f}%"
             },
+            "redemptions": full_export.wallet_summary.get("total_redemptions", 0),
+            "positions": full_export.wallet_summary.get("active_positions", 0),
             "strategy": full_export.detected_strategy["primary_strategy"],
             "risk_level": full_export.risk_profile.get("risk_level", "unknown"),
             "top_insight": full_export.key_insights[0] if full_export.key_insights else "No insights available",
